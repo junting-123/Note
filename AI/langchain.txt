@@ -1,0 +1,30 @@
+langchain
+你在学“如何教AI变得更像人”
+具体包括：
+怎么让AI记住你说过的话（记忆）
+怎么让AI使用工具（工具调用）
+怎么让AI自己拆解任务（链和代理）
+怎么让AI做决策（推理）
+
+
+
+调用 LangChain 的核心就是 3 步走：先装包、再连模型、最后“链”起来
+
+
+1.安装
+创建虚拟环境
+# Windows
+python -m venv langchain_env
+
+# macOS / Linux
+python3 -m venv langchain_env
+
+2.激活这个虚拟环境
+Windows (CMD)：langchain_env\Scripts\activate.bat
+
+Windows (PowerShell)：langchain_env\Scripts\Activate.ps1
+
+macOS / Linux：source langchain_env/bin/activate
+
+3.
+调用 LangChain 的核心就是 3 步走：先装包、再连模型、最后“链”起来

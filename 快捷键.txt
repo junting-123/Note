@@ -1,0 +1,7 @@
+CSDN:Typora
+引用块：Ctrl + Shift + Q
+
+插入图片
+运用snipate截图+picgo云上传
+1、F1剪切复制粘贴
+2、点击上传图片(上传到picgo)

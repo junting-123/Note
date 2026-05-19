@@ -1,0 +1,58 @@
+#1-收到同事给的其他语言的接口（也可能不是），对这个接口进行封装，以用于python的测试
+##1.1-类封装
+	最好将实现某种的功能的相关接口封装成一个类
+*任务：需要自行了解高级语言类的机制
+*注：
+	1-【接口】指的是一段代码，这段代码会实现某些连接功能
+	2-【封装】指的是将一段功能代码，包裹上自己的使用风格或者添加自己的新的功能，形成一个新的函数，但一定会调用到这段功能代码。
+
+#2-书写输入导入接口
+	在测试之前需要准备测试数据，这个数据可能很小，也可能很大。小数据直接在代码中书写即可，大数据可能会放在excel表格中，所以这里就需要写一个能读取excel表格到python中的程序，为后面进行测试做准备。（也有可能不是excel，其他格式做响应的调整）
+*任务：自行学习python处理多种数据格式的读取方式
+
+#3-基于pytest书写python的测试代码
+##3.1-测试格式
+###3.1.1-定义和封装测试类
+	这一步就是上述1所讲述的功能
+class XX:
+	def __init__(self, p1, p2...)	//这里就是初始化的地方，一般初始化的接口你的同事也是给你
+	def function1(self, p1...)	//功能1
+	def function2(self, p1...)	//功能2
+	...
+@pytest.fixture	//接入pytest的fixture特性
+	xx = XX()
+	...		//todo ： 初始化，例如：connect/clear
+	yield xx	//这一步是pytest内部完成两次调用，无需自己去调用这个函数
+	...		//todo : 清理，例如：close
+@pytest.fixture(scope="function")	//这里是定义了scope范围，下面的函数所创建的实例的生命周期是function类型的
+def func(xx)
+
+class TestUnit_XX	//这里就是一个个测试单元
+	def test_xx_func(self, xx)
+...
+if __name__ == "__main__":
+    # 使用 pytest 运行当前文件
+    pytest.main([__file__, "-v", "--tb=short"])
+任务：fixture的机制需要学习
+	我自己的感想：fixture机制是指将线性的流程化中相同的部分分离出去，让测试代码书写人员专注于测试逻辑而诞生
+*注：为什么要用pytest而不是自己写测试程序：
+自己写						pytest
+断言失败就停止	第一个断言失败，后续测试不执行	继续执行，报告所有失败
+需要手动写main	每个文件都要写调用逻辑		自动发现测试，无需main
+测试报告		己写print			生成详细报告
+大量重复代码	每个测试都要写try/except		fixture自动复用
+筛选运行		动注释/取消注释			test -k "关键字"
+并行执行		要自己实现			test -n 4
+第三方集成	手动对接				生态丰富，有很多插件
+
+#4-配置 pytest.ini文件
+
+#5-运行
+	 1. 运行所有测试
+	pytest test_phone_functions.py -v
+
+	 2. 运行特定测试类
+	pytest test_phone_functions.py::TestCallFunctions -v
+
+	 3. 运行特定测试函数
+	pytest test_phone_functions.py::TestCallFunctions::test_make_call_success -v
