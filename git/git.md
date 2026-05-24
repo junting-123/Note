@@ -92,6 +92,12 @@ ssh -T git@github.com
 
 ## 三、本地项目推送至github仓库
 
+流程：
+
+![image-20260523215653627](C:/Users/79153/AppData/Roaming/Typora/typora-user-images/image-20260523215653627.png)
+
+
+
 完整命令：
 
 ```bash
@@ -101,7 +107,7 @@ git init  #初始化仓库
 git add .  #添加文件到本地仓库
 git commit -m "first commit"  #添加文件描述信息
 
-git remote add origin + 远程仓库地址 //链接远程仓库，创建主分支
+git remote add origin + 远程仓库地址 //链接远程仓库，创建主分支 eg：git remote add origin https://github.com/junting-123/Note.git
 git push -u origin main  #把本地仓库的文件推送到远程仓库
 git pull origin master #把本地仓库的变化连接到远程仓库主分支
 ```
@@ -115,6 +121,9 @@ git pull origin master #把本地仓库的变化连接到远程仓库主分支
 其他git语句
 
 ```
+# 添加远程仓库
+git remote add origin<远程仓库地址>
+
 # 查看当前分支
 git branch
 
