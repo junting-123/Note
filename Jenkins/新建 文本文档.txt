@@ -1,0 +1,17 @@
+启动Jenkins：cd到所在目录
+java -jar jenkins.war
+
+启动ngrok
+ngrok http 8080
+
+# nohup 命令可以让进程忽略挂断信号（SIGHUP）
+nohup ngrok http localhost:8080 > ngrok.log 2>&1 &
+
+# 查看运行状态
+ps aux | grep ngrok
+
+# 获取公网地址
+cat ngrok.log
+
+# 停止 ngrok 进程
+pkill ngrok

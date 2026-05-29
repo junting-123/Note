@@ -1,5 +1,9 @@
 
 
+
+
+
+
 # 前言
 
 **基于客户端-服务端架构的计算器长稳自动化测试系统**
@@ -401,8 +405,8 @@ COPY . /app
 # 安装应用程序依赖
 RUN pip install -r requirements.txt
 
-# 暴露应用程序需要的端口（Flask 默认 8080）
-EXPOSE 8080
+# 暴露应用程序需要的端口
+EXPOSE 8081
 
 # 定义容器启动时运行的命令
 CMD ["python", "calculatorweb.py"]
@@ -427,14 +431,14 @@ docker images
 # 应该看到 calculator-web 在列表中
 
 # 运行（注意端口映射：主机端口:容器端口）
-docker run -d -p 8080:8080 calculator-web
+docker run -d -p 8081:8081 calculator-web
 
 # 验证容器是否运行成功 
 docker ps
 # 应该看到 calculator-web 容器状态为 Up
 
 # 测试
-curl "http://localhost:8080/calc?a=10&b=5&op=add"
+curl "http://localhost:8081/calc?a=10&b=5&op=add"
 # 应该返回 {"result":15}
 ```
 
@@ -543,27 +547,27 @@ docker ps
 
 ## 四、接口测试
 
-项目会进行接口测试和jmeter性能测试，代码测试仓库包含：
+项目会进行接口测试和jmeter性能测试，接口代码测试仓库包含：
 
 项目根目录/
 
 ```
+api_test/              		 # 根目录
 ├── test_api.py              # pytest 接口测试脚本
 ├── test_data.json           # pytest 测试用例数据
-├── jmeter/
-│   └── calculator_test.jmx  # JMeter 压力测试计划
-└── Jenkinsfile              # Jenkins Pipeline 脚本
+├── requirenments            # pytest 需求库
+├── dockerfile               # docker 打包说明书
 ```
 
 
 
-#### 4.1 test_api测试用例
+#### 4.1 test_api 测试用例
 
 根据测试用例的常用方法，编写测试用例，先用表格记录：
 
 ![image-20260521001039449](https://cdn.jsdelivr.net/gh/junting-123/my-blog-images/img/20260521001041566.png)
 
-#### 4.2 test_data.json数据写入
+#### 4.2 test_data.json 数据写入
 
 将数据写入文件夹中test_data.json
 
@@ -589,7 +593,7 @@ docker ps
 }
 ```
 
-#### 4.3 test_api.py测试脚本
+#### 4.3 test_api.py 测试脚本
 
 代码如下：
 
@@ -601,8 +605,12 @@ import requests
 # 从 JSON 文件加载测试数据
 data = json.load(open("test_data.json", encoding='utf-8'))
 
-# 服务端的地址，后续测试会用这个地址拼接完整请求的URL
-BASE_URL = "http://192.168.0.104:8080"
+# 服务端的地址 - 根据你的部署情况选择
+# 如果测试脚本在虚拟机上运行 
+# BASE_URL = "http://localhost:8081"
+
+# 如果测试脚本在本地 Windows 运行，访问虚拟机中的服务
+BASE_URL = "http://192.168.171.128:8081"
 
 # pytest 提供的功能，用于批量执行测试
 @pytest.mark.parametrize("op, cases", data.items())
@@ -611,6 +619,10 @@ def test_calculator(op, cases):
     for case in cases:
         resp = requests.get(f"{BASE_URL}/calc", params={"a": case["a"], "b": case["b"], "op": op})
         assert resp.json()["result"] == case["expected"], f'失败：{case["desc"]}'
+
+# 添加这个入口，让脚本可以直接运行
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
 ```
 
 终端运行：
@@ -620,6 +632,65 @@ pytest test_api.py -v
 ```
 
 运行成功就可以查看结果了！
+
+
+
+#### 4.4 生成 Allure 报告数据
+
+终端运行：
+
+```
+# 运行测试，并让 pytest 把报告数据存到 'allure-results' 文件夹
+pytest test_api.py --alluredir=./allure-results
+```
+
+这一步执行后，你会看到一个 `allure-results` 文件夹，里面是一些 `.json` 文件，它们是报告的“原材料”。
+
+```
+# Allure 会自动启动一个本地服务，并打开你的默认浏览器
+allure serve ./allure-results
+```
+
+执行这条命令后，Allure 会读取数据、生成一个网页版报告，并自动在你的浏览器中打开一个全新的、带图表的测试报告页面。
+
+![image-20260528165123963](https://cdn.jsdelivr.net/gh/junting-123/my-blog-images/img/20260528165125229.png)
+
+
+
+#### 4.5 打包成 docker
+
+同目录下增加 requirements 和 dockerfile
+
+requirenments 如下：
+
+```txt
+# 对应好自己的版本号
+pytest==9.0.2
+requests==2.33.1
+allure-pytest==2.15.3
+```
+
+dockerfile 如下：
+
+```
+# 使用官方 Python 基础镜像
+FROM python:3.12
+
+# 设置工作目录
+WORKDIR /test
+
+# 复制依赖文件并安装
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 复制项目文件
+COPY . .
+
+# 启动应用
+CMD ["pytest", "test_api.py", "-v"]
+```
+
+这一步打包成 docker 的目的是让服务端的 jenkins 能自动构建测试镜像并完成自动化测试。
 
 
 
@@ -715,6 +786,8 @@ JMeter的HTTP请求是性能测试中常用的功能，用于模拟用户向服�
 - **聚合报告 (Aggregate Report)**：核心报告，能看吞吐量、平均响应时间、错误率等关键指标。
 - **查看结果树 (View Results Tree)：**调试必备，能看每个请求的详细请求和响应数据，先用它确保脚本没问题，再跑正式压测。
 
+![image-20260529161357016](https://cdn.jsdelivr.net/gh/junting-123/my-blog-images/img/20260529161358192.png)
+
 
 
 4.运行测试
@@ -765,11 +838,39 @@ jmeter -n -t E:\code\calculator\calculatortest\jmeter\calculator_test.jmx -l E:\
 
 
 
-## 六、CI/CD全自动工作流（Jenkins）
+#### 5.4 打包成 docker
+
+为了在容器里跑 JMeter，需要写一个 Dockerfile 来打包。
+
+1. **创建 Dockerfile**：在项目根目录下，创建名为 `Dockerfile` 的文件，内容如下
+
+```dockerfile
+# 使用轻量级的 JMeter 基础镜像
+FROM alpine/jmeter:5.6-alpine
+
+# 设置工作目录，Jenkins 会将脚本挂载到这里
+WORKDIR /jmeter
+
+# 设置容器入口命令，非 GUI 模式运行
+ENTRYPOINT ["jmeter", "-n", "-t", "/jmeter/test.jmx"]
+```
+
+> **说明**：`alpine/jmeter` 是一个官方轻量级镜像。`-n` 代表在非 GUI 模式下运行
+
+
+
+
+
+
+
+
+
+## 六、CI/CD 持续部署工作流（Jenkins）
 
 ### 6.1 CI/CD总体流程
 
-在初步学习了接口测试和性能测试之后，我们尝试着将其形成全自动工作流。
+> 在初步学习了接口测试和性能测试之后，我们尝试着将其形成全自动工作流。Jenkins是一个流行的开源自动化服务器，可以帮助我们实现这样的流程。
+>
 
 CI：持续集成（Continuous Integration）
 
@@ -786,9 +887,13 @@ CD：持续交付（Continuous Delivery）或持续部署（Continuous Deploymen
 | **③ CD 持续部署** | Step9-15 | 自动发布 + 上线              | Docker 部署到虚拟机 |
 | **④ 完成**        | End      | 服务正式运行                 | 计算器服务可用      |
 
+Linux上Jenkins下载参考文章：[Ubuntu 24.04上安装 Jenkins-CSDN博客](https://blog.csdn.net/manmanmanzai/article/details/161432745?spm=1001.2014.3001.5501)
 
 
-### 6.2 Jenkins拉取最新代码
+
+### 6.2 Jenkins拉取Git项目
+
+接下来我们学习如何将本地代码推送至github，然后用Jenkins拉取Git项目，并打包成Docker镜像。
 
 如下是CD部署流程：
 
@@ -796,9 +901,9 @@ CD：持续交付（Continuous Delivery）或持续部署（Continuous Deploymen
 
 
 
-1.本地代码推送至github
+#### 6.2.1 本地代码推送至 github
 
-cd到推送到github的文件夹，终端执行：
+cd到推送到 github 的文件夹，终端执行：
 
 ```bash
 # 初始化文件夹，用于将一个普通文件夹转换为 Git 仓库
@@ -825,15 +930,563 @@ git push -u origin main
 
 
 
-2.Jenkins拉取
+#### 6.2.2 在 github 上生成Token
 
-Jenkins下载：[Download and deploy](https://www.jenkins.io/download/)
+> 无论你是用 Jenkins、命令行、还是任何第三方工具，都无法再用"账号+密码"的方式拉取代码。**Token 是替代密码的官方方案**，它更适合 CI/CD 场景，权限可控、可随时撤销
 
-在存放 `jenkins.war` 文件的目录下，启动一个终端：
+①**进入设置页面**：登录 GitHub，点击右上角头像 -> **Settings**。
+
+②**找到入口**：在页面左侧最下方，点击 **Developer settings** -> **Personal access tokens** -> **Tokens (classic)** 。
+
+③**生成新 Token**：点击 **Generate new token** (classic)。
+
+④**设置权限 (最关键的一步)**：
+
+- **Note**：给 Token 起个名字，比如 `Jenkins-K8s`。
+- **Expiration**：建议设置过期时间（如 90 天或 1 年），这是为了保障安全，到期后需要重新生成 
+- **Scopes (权限范围)**：**务必勾选 `repo`** 这一整项 。如果你之后想让 Jenkins 自动帮你创建 Webhook，还需要额外勾选 **`admin:repo_hook`** 。
+
+⑤**复制 Token**：点击页面底部的绿色按钮生成。**注意：这个 Token 只会显示这一次，一定要立刻复制并保存好！** 
+
+
+
+#### 6.2.4 在 Jenkins 中配置凭证
+
+1. **进入凭据管理页面**：
+   - 在 Jenkins 首页，点击左侧的 **Manage Jenkins** > **Credentials** > 点击 **System** 列下的 **Global credentials (unrestricted)** 链接。
+   - 在打开的页面中，点击左侧的 **Add Credentials**。
+2. **填写 Token 信息**：
+   - **Kind (类型)**：虽然也可以选择 `Secret text`，但对于 Git 操作，选择 **`Username with password`** 是最稳定且不易出错的。
+   - **Username (用户名)**：这里直接填写你的 **GitHub 用户名**。
+   - **Password (密码)**：**不要填你的 GitHub 登录密码**。在这里 **粘贴** 你刚才从 GitHub 复制好的 **Token**。
+   - **ID**：这是 Jenkins 内部使用的唯一标识，可以起一个有意义的名字，比如 `github-token`。
+   - **Description (描述)**：简单的说明，比如 `GitHub Personal Access Token`。
+3. **保存**：点击 **Create** 或 **Save** 按钮，完成配置。
+
+
+
+#### 6.2.5 Jenkinsfile 拉取github
+
+1.配置 Jenkins 插件
+
+- Git Plugin：用于从Git拉取代码
+- Docker Pipeline：用于Docker操作
+
+进入Jenkins首页，选择“管理Jenkins -> 管理插件 -> 可用插件”，搜索并安装所需插件即可。
+
+
+
+2.创建 Jenkins Job
+
+- 在 Jenkins 首页选择“新。建Item”
+- 输入任务名称“拉取git”并选择“流水线”，然后点击“确定”
+- 在任务配置页面进行如下配置
+
+在“流水线”部分添加如下代码：
+
+```groovy
+pipeline {
+    agent any
+    stages {
+        stage('拉取代码') {
+            steps {
+                git branch: 'master',
+                    url: 'https://github.com/用户名/仓库.git',
+                    credentialsId: 'github-token'
+            }
+        }
+    }
+}
+```
+
+拉取成功后会出现在 jenkins_home\workspace 里面，那如何进一步实现Jenkins在你每次`git push`到GitHub时自动拉取代码并构建，最推荐的方法是配置**GitHub Webhook**，这样GitHub会在代码变更时主动通知Jenkins，实现真正的实时自动化。
+
+
+
+#### 6.2.6 github Webhook触发Jenkins 自动拉取
+
+1.在Jenkins中配置任务
+
+①登录Jenkins，进入你的任务（Job）配置页面。
+
+②在构建触发器部分，勾选 **GitHub hook trigger for GITScm polling**和**Poll SCM**。设置每小时检查一次更新
+
+```
+H/60 * * * *
+```
+
+③保存配置。
+
+第二种方式是配置 GitHub Webhook，使得github每更新一次就会触发自动拉取。
+
+
+
+2.在GitHub仓库中设置Webhook
+
+①打开你的GitHub仓库，进入 **Settings** -> **Webhooks** -> **Add webhook**。
+
+②在表单中填写：
+
+- **Payload URL**: 填写 `http://<你的Jenkins地址>/github-webhook/`。例如：`http://192.168.1.100:8080/github-webhook/`。
+- **Content type**: 选择 `application/json`。
+- **Events**: 选择 `Just the push event`，这样只有在代码推送时才会触发。
+
+③点击 **Add webhook** 保存。
+
+*注意：<你的Jenkins地址>必须用公网地址，可使用内网穿透技术部署成公网ip。
+
+内网穿透技术详见：[Windows/Linux 使用ngrok实现内网穿透-CSDN博客](https://blog.csdn.net/manmanmanzai/article/details/161453597?spm=1001.2014.3001.5501)
+
+
+
+这样，之后每次你用`git push`命令推送代码，GitHub就会自动通知Jenkins，Jenkins随即开始拉取代码并执行你的Pipeline。你可以在GitHub仓库的Webhook页面看到每次触发的历史记录和响应状态（应为绿色勾选，表示成功）。
+
+
+
+### 6.3 Jenkins打包构建镜像
+
+根据之前介绍的docker打包部署逻辑，将其定义在pipeline里，如下：
+
+```groovy
+pipeline {
+    agent any
+    
+    environment {
+        DOCKER_IMAGE = 'calculator-web'
+        CONTAINER_NAME = 'calculator-web-app'
+        HOST_PORT = '8081'
+        CONTAINER_PORT = '8080'
+        WORK_DIR = 'calculatorweb'
+    }
+    
+    stages {
+        stage('Git Checkout') {
+            steps {
+                git branch: 'develop',
+                    url: 'http://github.com/junting-123/calculator.git',
+                    credentialsId: 'github-token'
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    echo "开始构建 Docker 镜像..."
+                    sh """
+                        cd ${WORK_DIR}
+                        docker build -t ${DOCKER_IMAGE}:latest .
+                        docker tag ${DOCKER_IMAGE}:latest ${DOCKER_IMAGE}:build-${BUILD_NUMBER}
+                    """
+                    echo "镜像构建完成: ${DOCKER_IMAGE}:latest"
+                }
+            }
+        }
+        
+        stage('Stop Old Container') {
+            steps {
+                script {
+                    echo "停止旧容器..."
+                    sh """
+                        docker stop ${CONTAINER_NAME} 2>/dev/null || true
+                        docker rm ${CONTAINER_NAME} 2>/dev/null || true
+                    """
+                }
+            }
+        }
+        
+        stage('Run New Container') {
+            steps {
+                script {
+                    echo "启动新容器..."
+                    sh """
+                        docker run -d \
+                            -p ${HOST_PORT}:${CONTAINER_PORT} \
+                            --name ${CONTAINER_NAME} \
+                            --restart unless-stopped \
+                            ${DOCKER_IMAGE}:latest
+                    """
+                    echo "容器启动成功: ${CONTAINER_NAME}"
+                }
+            }
+        }
+        
+    
+        
+        stage('Cleanup') {
+            steps {
+                script {
+                    echo "清理旧的 Docker 镜像..."
+                    sh """
+                        docker image prune -f --filter "until=24h" 2>/dev/null || true
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        failure {
+            script {
+                echo "构建失败，查看容器日志..."
+                sh """
+                    docker logs ${CONTAINER_NAME} --tail 50 2>/dev/null || true
+                """
+            }
+        }
+        always {
+            script {
+                echo "Pipeline 执行完成"
+                sh 'docker ps -a | grep calculator-web || true'
+            }
+        }
+    }
+}
+```
+
+ 
+
+验证是否成功部署：
+
+```
+# 查看镜像
+docker images
+
+# 查看容器是否在运行
+docker ps | grep xx
+
+# 测试应用是否返回内容（根据你的实际路径）
+curl http://localhost:8081/calc?a=10&b=5&op=add
+```
+
+
+
+## 七、CI/CD自动测试工作流
+
+### 7.1 自动测试架构设计
+
+通过第六章我们已经完成了持续部署工作流：
+
+github 每更新一次 -> 自动触发拉取git仓库 -> 构建docker镜像 -> 部署到服务端
+
+接下来我们将测试部分加入工作流中，推荐创建独立的的测试流水线，架构设计如下：
+
+```
+部署流水线 (已存在)
+    ↓ (触发)
+测试流水线 (新建)
+    ↓ (测试)
+测试报告
+```
+
+
+
+### 7.2 接口测试报告生成
+
+1.Jenkins 中安装 Allure 插件
+
+在Jenkins中生成和展示报告，首先需要安装对应的插件
+
+- 进入 Jenkins：**Manage Jenkins → Plugins → Available plugins**
+
+- 搜索 **"Allure"**，勾选并安装
+
+- 重启 Jenkins（可勾选"安装完成后重启"）
+
+  
+
+2.配置 Allure 命令行工具
+
+为了让Jenkins能生成报告，我们需要告诉它Allure命令行工具在哪里
+
+- 进入：**Manage Jenkins → Tools → Allure Commandline installations**
+
+- 点击 **Add Allure Commandline**
+
+- Name 填 `Allure`，勾选 **Install automatically**
+
+- 版本选择最新的稳定版（如 2.27.0 以上）
+
+
+
+
+Pipeline如下：
+
+```groovy
+pipeline {
+    agent any
+    
+    stages {
+        stage('拉取代码') {
+            steps {
+                git branch: 'master',
+                    url: 'git@github.com:junting-123/calculator.git'
+                    credentialsId:'github-token'
+            }
+        }
+        
+        stage('构建测试镜像') {
+            steps {
+                sh '''
+                    cd calculatortest/api_test
+                    docker build -t api-test:latest .
+                '''
+            }
+        }
+        
+        stage('查看镜像') {
+            steps {
+                sh 'docker images | grep api-test'
+            }
+        }
+        
+        stage('运行测试并生成Allure数据') {
+            steps {
+                sh '''
+                    cd calculatortest/api_test
+                    mkdir -p allure-results
+                    docker run --rm \
+                        -v $(pwd)/allure-results:/tests/allure-results \
+                        api-test:latest \
+                        pytest test_api.py --alluredir=/tests/allure-results
+                '''
+            }
+        }
+        
+        stage('生成Allure报告') {
+            steps {
+                allure([
+                    includeProperties: false,
+                    jdk: '',
+                    properties: [],
+                    reportBuildPolicy: 'ALWAYS',
+                    results: [[path: 'calculatortest/api_test/allure-results']]
+                ])
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo '✅ 测试通过！'
+        }
+        failure {
+            echo '❌ 测试失败！'
+        }
+    }
+}
+```
+
+
+
+运行完成后，可以在 Jenkins 界面查看 Allure 报告：
+
+![image-20260529143150039](https://cdn.jsdelivr.net/gh/junting-123/my-blog-images/img/20260529143152927.png)
+
+
+
+### 7.3 测试报告发送至飞书
+
+1.飞书机器人配置
+
+1. **打开飞书群聊** → 点击右上角 `···` → **设置** → **群机器人** 
+2. 点击 **添加机器人** → 选择 **自定义机器人**
+3. 给机器人起名，如 `CI测试报告`
+4. **安全设置**（建议开启，否则URL泄露会有安全隐患）：
+   - 勾选 **签名校验** → 复制保存生成的 `SEC_xxxx` 密钥
+5. 点击完成，复制保存 **Webhook地址**（格式：`https://open.feishu.cn/open-apis/bot/v2/hook/xxx`）
+
+
+
+2.验证连通性
 
 ```bash
-java -jar jenkins.war
+curl -X POST -H 'Content-Type: application/json' \
+-d '{
+    "msg_type": "text",
+    "content": {"text": "测试消息"}
+}' https://open.feishu.cn/open-apis/bot/v2/hook/
+你的Webhook地址
 ```
+
+返回 `{"StatusCode":0}` 表示成功，你的飞书会收到“测试消息”的字样。
+
+
+
+3.在 Jenkins 中配置 Webhook
+
+①在你的 Jenkins 项目中点击 **Configure**
+
+②找到 **"Feishu Configuration"** 或 **"飞书配置"** 区域
+
+③将 **"Custom Webhook"** 改为 **"Yes"**
+
+④在下方 **"Webhook URL"** 输入框粘贴复制的地址
+
+⑤根据需要设置：
+
+- **"Notify Success"**：是否通知成功（选是）
+- **"Notify Failure"**：是否通知失败（选是）
+- **"Notify Unstable"**：是否通知不稳定（选是）
+
+⑥点击 **Save**
+
+
+
+3.确认Allure报告可访问
+
+你已经通过Allure插件成功生成了报告，报告地址格式为：
+
+```txt
+http://你的JenkinsIP:8080/job/你的任务名/构建编号/allure/
+```
+
+
+
+4.Pipeline 集成飞书通知
+
+将飞书发送封装成独立的 Pipeline，命名为 send-feishu 流水线：
+
+```
+pipeline {
+    agent any
+    
+    parameters {
+        string(name: 'JOB_NAME', defaultValue: '', description: '项目名称')
+        string(name: 'BUILD_NUMBER', defaultValue: '', description: '构建编号')
+        string(name: 'BUILD_URL', defaultValue: '', description: '构建地址')
+        string(name: 'RESULT', defaultValue: 'SUCCESS', description: '构建结果')
+    }
+    
+    stages {
+        stage('发送飞书通知') {
+            steps {
+                script {
+                    def webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/d27ef06c-cdad-4eff-a7d0-46f089c661bf"
+                    def status = params.RESULT
+                    def statusText = status == 'SUCCESS' ? '✅ 通过' : '❌ 失败'
+                    def statusColor = status == 'SUCCESS' ? 'green' : 'red'
+                    def reportUrl = "${params.BUILD_URL}allure/"
+                    
+                    sh """
+                        curl -X POST -H 'Content-Type: application/json' \
+                        -d '{
+                            "msg_type": "interactive",
+                            "card": {
+                                "header": {
+                                    "title": {"content": "Jenkins 构建通知", "tag": "plain_text"},
+                                    "template": "${statusColor}"
+                                },
+                                "elements": [{
+                                    "tag": "div",
+                                    "text": {
+                                        "content": "**项目**: ${params.JOB_NAME}\\n**构建号**: #${params.BUILD_NUMBER}\\n**结果**: ${statusText}\\n**报告**: [点击查看](${reportUrl})",
+                                        "tag": "lark_md"
+                                    }
+                                }]
+                            }
+                        }' ${webhook}
+                    """
+                    echo "飞书通知已发送"
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo '✅ 飞书通知发送成功'
+        }
+        failure {
+            echo '❌ 飞书通知发送失败'
+        }
+    }
+}
+```
+
+
+
+主测试中添加send-feishu，完整版如下：
+
+```groovy
+pipeline {
+    agent any
+    
+    // 1. 拉取测试代码
+    stages {
+        stage('拉取代码') {
+            steps {
+                git branch: 'master',
+                    url: 'http://github.com/junting-123/calculator.git',
+                    credentialsId: 'github-token'
+            }
+        }
+    
+        stage('构建测试镜像') {
+            steps {
+                sh '''
+                    cd calculatortest/api_test
+                    docker build -t api-test:latest .
+                '''
+            }
+        }
+        stage('运行测试并生成Allure数据') {
+            steps {
+                sh '''
+                    cd calculatortest/api_test
+                    # 创建报告目录
+                    mkdir -p allure-results
+                    # 运行测试并生成 Allure 数据
+                    docker run --rm \
+                        -v $(pwd)/allure-results:/tests/allure-results \
+                        api-test:latest \
+                        pytest test_api.py --alluredir=/tests/allure-results
+                '''
+            }
+        }
+        
+        stage('生成Allure报告') {
+            steps {
+                allure([
+                    includeProperties: false,
+                    jdk: '',
+                    properties: [],
+                    reportBuildPolicy: 'ALWAYS',
+                    results: [[path: 'calculatortest/api_test/allure-results']]
+                ])
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                def reportUrl = "${env.BUILD_URL}allure/"
+            
+            // 触发飞书通知
+                build job: 'send-feishu',
+                    parameters: [
+                        string(name: 'JOB_NAME', value: env.JOB_NAME),
+                        string(name: 'BUILD_NUMBER', value: env.BUILD_NUMBER),
+                        string(name: 'BUILD_URL', value: env.BUILD_URL),
+                        string(name: 'RESULT', value: currentBuild.result ?: 'SUCCESS')
+                ],
+                    wait: true
+                echo "📱 已触发飞书通知任务"
+            }
+        }
+        success {
+            echo '✅ 测试通过！'
+        }
+        failure {
+            echo '❌ 测试失败！'
+        }
+    }
+}
+```
+
+
+
+
 
 
 
@@ -864,7 +1517,15 @@ java -jar jenkins.war
 | `docker rmi 镜像名`                | 删除镜像            |
 | `docker inspect 镜像名`            | 查看镜像详细信息    |
 
+```
+先删除容器，再删除镜像
 
+# 1. 停止并删除所有容器
+docker rm -f $(docker ps -aq)
+
+# 2. 删除所有镜像
+docker rmi -f $(docker images -q)
+```
 
 
 

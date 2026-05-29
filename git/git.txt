@@ -1,0 +1,29 @@
+# 查看远程仓库的 URL
+git remote -v
+
+# 添加远程仓库
+git remote add origin<远程仓库地址>
+
+# 查看当前分支
+git branch
+
+# 查看所有分支（本地+远程）
+git branch -a
+
+# 切换分支
+git checkout 分支名
+
+# 删除本地分支
+git branch -d 分支名
+
+# 删除远程分支
+git push origin --delete develop
+git push origin --delete test
+
+git add .  #添加文件到本地仓库
+git commit -m "first commit"  #添加文件描述信息
+
+git push -u origin main  #把本地仓库的文件推送到远程仓库，第一次加-u
+
+git pull origin master #把本地仓库的变化连接到远程仓库主分支
+
