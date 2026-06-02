@@ -545,29 +545,253 @@ docker ps
 
 
 
+### 3.4 自动部署编写 jenkinsfile
+
+```
+calculatorweb/              		
+├── calculator.py                      
+├── requirenments           
+├── dockerfile              
+└── jenkinsfile  					# 主流水线
+└── jenkinsfiles/  
+    └── send_feishu.groovy			# 子脚本
+    └── check_path.groovy	
+```
+
+
+
+send_feishu.groovy：
+
+```groovy
+def call(Map params) {
+    def webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/d27ef06c-cdad-4eff-a7d0-46f089c661bf"
+    def status = params.RESULT
+    def statusText = status == 'SUCCESS' ? '✅ 通过' : '❌ 失败'
+    def statusColor = status == 'SUCCESS' ? 'green' : 'red'
+    
+    sh """
+        curl -X POST -H 'Content-Type: application/json' \
+        -d '{
+            "msg_type": "interactive",
+            "card": {
+                "header": {
+                    "title": {"content": "Jenkins 部署通知", "tag": "plain_text"},
+                    "template": "${statusColor}"
+                },
+                "elements": [{
+                    "tag": "div",
+                    "text": {
+                        "content": "**项目**: ${params.JOB_NAME}\\n**构建号**: #${params.BUILD_NUMBER}\\n**部署结果**: ${statusText}",
+                        "tag": "lark_md"
+                    }
+                }]
+            }
+        }' ${webhook}
+    """
+    echo "部署通知已发送"
+}
+
+return this
+```
+
+
+
+check_path:
+
+```groovy
+def call(String targetPath){
+    // 获取本次构建的变更文件列表
+    def changeLogSets = currentBuild.changeSets
+    def changedFiles = []
+
+    // 收集所有变更的文件路径
+    for (changeLogSet in changeLogSets){
+        for (entry in changeLogSet.getItems()){
+            for (path in entry.getAffectedPaths()){
+                changedFiles.add(path)
+            }
+        }
+    }
+
+    // 如果没有变更记录 (手动构建、定时执行)， 默认执行
+    if (changedFiles.isEmpty()){
+        println "⏭️ 无变更记录（手动/定时构建），默认执行"
+        return true
+    }
+
+    // 检查是否包含目标路径的变更
+    for (file in changedFiles){
+        if (file.startsWith(targetPath)){
+            println "✅ 检测到目标路径变更： ${file}"
+            return true
+        }
+    }
+
+    // 没有相关更新
+    println "❌ 没有检测到 ${targetPath} 的变更,跳过构建"
+    return false
+}
+
+    return this
+```
+
+
+
+jenkinsfile :
+
+```groovy
+pipeline {
+    agent any
+
+    // 可选：添加参数，允许手动构建时跳过路径检查
+    parameters {
+        booleanParam(name: 'SKIP_PATH_CHECK', defaultValue: false, description: '手动构建时跳过路径检查')
+    }
+
+    stages {
+        // 新增：检查变更路径的 stage
+        stage('检查变更路径') {
+            when {
+                expression { !params.SKIP_PATH_CHECK }  // 手动构建时可跳过检查
+            }
+            steps {
+                script {
+                    // 加载 checkPath 函数
+                    def check_path = load "${env.WORKSPACE}/calculatorweb/jenkinsfiles/check_path.groovy"
+                    
+                    // 检查是否是 calculatorweb 目录的变更
+                    def shouldRun = check_path('calculatorweb/')
+                    
+                    if (!shouldRun) {
+                        echo "⏭️ 没有检测到 calculatorweb 目录的变更，跳过构建"
+                        currentBuild.result = 'SUCCESS'
+                        // 使用 error 但标记为 ABORTED，这样 post 不会执行
+                        currentBuild.description = 'SKIPPED'
+                        return
+                    }
+                }
+            }
+        }
+    
+        stage('拉取代码') {
+            when{
+                expression { currentBuild.description != 'SKIPPED' }
+            }
+            steps {
+                retry(3){ // 失败后重试
+                    git branch: 'master',
+                        url: 'git@github.com:junting-123/calculator.git',
+                        credentialsId: ''
+                }
+            }
+        }
+
+        stage('清理旧镜像') {
+            when {
+                expression { currentBuild.description != 'SKIPPED' }
+            }
+            steps {
+                sh '''
+                    echo "=== 删除旧镜像 ==="
+                    docker rmi calculatorweb:latest || true
+                '''
+            }
+        }
+    
+        stage('构建镜像') {
+            when{
+                expression { currentBuild.description != 'SKIPPED' }
+            }
+            steps {
+                sh '''
+                    cd calculatorweb
+                    docker build -t calculatorweb:latest .
+                '''
+            }
+        }
+
+        stage('部署到服务器') {
+            when {
+                expression { currentBuild.description != 'SKIPPED' }
+            }
+            steps {
+                sh '''
+                    echo "=== 停止占用 8081 端口的容器  ==="
+                    # 查找占用 8081 端口的容器
+                    CONTAINER_ID=$(docker ps -q --filter "publish=8081")
+                    if [ -n "$CONTAINER_ID" ]; then
+                        echo "停止容器: $CONTAINER_ID"
+                        docker stop $CONTAINER_ID
+                        docker rm $CONTAINER_ID
+                    fi
+            
+                    # 同时也停止 calculatorweb 容器（如果存在）
+                     docker stop calculatorweb || true
+                    docker rm calculatorweb || true
+                    
+                    echo "=== 启动新容器 ==="
+                    docker run -d \
+                        --name calculatorweb \
+                        -p 8081:8081 \
+                        calculatorweb:latest
+                    
+                    echo "=== 部署完成 ==="
+                '''
+            }
+        }
+
+    }
+    
+    post {
+        always {
+            script {
+                // 只有不是被跳过的构建，才执行
+                if (currentBuild.description != 'SKIPPED'){
+                def notify = load "${env.WORKSPACE}/calculatorweb/jenkinsfiles/send_feishu.groovy"
+
+                notify([
+                    JOB_NAME: env.JOB_NAME,
+                    BUILD_NUMBER: env.BUILD_NUMBER,
+                    BUILD_URL: env.BUILD_URL,
+                    RESULT: currentBuild.result ?: 'SUCCESS'
+                ])
+                echo "📱 飞书通知已发送"
+                }
+                else{
+                    echo "⏭️ 构建被跳过，不生成通知"
+                }
+            }
+        }
+
+        success {
+            echo '✅ 部署通过！'
+        }
+
+        failure {
+            echo '❌ 部署失败！'
+        }
+
+        aborted {
+            echo '⏭️ 流水线被跳过（路径不匹配）'
+        }
+    }
+}
+
+```
+
+
+
 ## 四、接口测试
 
-项目会进行接口测试和jmeter性能测试，接口代码测试仓库包含：
+项目会进行接口测试和jmeter性能测试
 
-项目根目录/
-
-```
-api_test/              		 # 根目录
-├── test_api.py              # pytest 接口测试脚本
-├── test_data.json           # pytest 测试用例数据
-├── requirenments            # pytest 需求库
-├── dockerfile               # docker 打包说明书
-```
-
-
-
-#### 4.1 test_api 测试用例
+### 4.1 test_api 测试用例
 
 根据测试用例的常用方法，编写测试用例，先用表格记录：
 
 ![image-20260521001039449](https://cdn.jsdelivr.net/gh/junting-123/my-blog-images/img/20260521001041566.png)
 
-#### 4.2 test_data.json 数据写入
+### 4.2 test_data.json 数据写入
 
 将数据写入文件夹中test_data.json
 
@@ -593,7 +817,7 @@ api_test/              		 # 根目录
 }
 ```
 
-#### 4.3 test_api.py 测试脚本
+### 4.3 test_api.py 测试脚本
 
 代码如下：
 
@@ -635,7 +859,7 @@ pytest test_api.py -v
 
 
 
-#### 4.4 生成 Allure 报告数据
+### 4.4 生成 Allure 报告数据
 
 终端运行：
 
@@ -655,9 +879,9 @@ allure serve ./allure-results
 
 ![image-20260528165123963](https://cdn.jsdelivr.net/gh/junting-123/my-blog-images/img/20260528165125229.png)
 
+程序调整成熟后，我们将他打包上传。
 
-
-#### 4.5 打包成 docker
+### 4.5 编写 dockerfile
 
 同目录下增加 requirements 和 dockerfile
 
@@ -690,13 +914,255 @@ COPY . .
 CMD ["pytest", "test_api.py", "-v"]
 ```
 
-这一步打包成 docker 的目的是让服务端的 jenkins 能自动构建测试镜像并完成自动化测试。
+这一步写完 dockerfile 后，将代码 git push到 github，后续会通过服务端的 jenkins 拉取代码并进行打包，在服务端构建镜像并自动测试。
+
+
+
+### 4.6 编写 jenkinsfile 
+
+将后续 jenkins 需要构建的流水线代码写在本地 Jenkinsfile 中，存在 Git 里，随代码一起版本管理。
+
+结构：
+
+```
+api_test/              		
+├── test_api.py             
+├── test_data.json          
+├── requirenments           
+├── dockerfile              
+└── jenkinsfile  					# 主流水线
+└── jenkinsfiles/  
+    └── send_feishu.groovy			# 子脚本
+    └── check_path.groovy	
+```
+
+
+
+子目录 send_feishu 的 jenkinsflie ，这个流水线主要是将结果上传飞书 ：
+
+```
+pipeline {
+    agent any
+    
+    parameters {
+        string(name: 'JOB_NAME', defaultValue: '', description: '项目名称')
+        string(name: 'BUILD_NUMBER', defaultValue: '', description: '构建编号')
+        string(name: 'BUILD_URL', defaultValue: '', description: '构建地址')
+        string(name: 'RESULT', defaultValue: 'SUCCESS', description: '构建结果')
+    }
+    
+    stages {
+        stage('发送飞书通知') {
+            steps {
+                script {
+                    def webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/d27ef06c-cdad-4eff-a7d0-46f089c661bf"
+                    def status = params.RESULT
+                    def statusText = status == 'SUCCESS' ? '✅ 通过' : '❌ 失败'
+                    def statusColor = status == 'SUCCESS' ? 'green' : 'red'
+                    def reportUrl = "${params.BUILD_URL}allure/"
+                    
+                    sh """
+                        curl -X POST -H 'Content-Type: application/json' \
+                        -d '{
+                            "msg_type": "interactive",
+                            "card": {
+                                "header": {
+                                    "title": {"content": "Jenkins 构建通知", "tag": "plain_text"},
+                                    "template": "${statusColor}"
+                                },
+                                "elements": [{
+                                    "tag": "div",
+                                    "text": {
+                                        "content": "**项目**: ${params.JOB_NAME}\\n**构建号**: #${params.BUILD_NUMBER}\\n**结果**: ${statusText}\\n**报告**: [点击查看](${reportUrl})",
+                                        "tag": "lark_md"
+                                    }
+                                }]
+                            }
+                        }' ${webhook}
+                    """
+                    echo "飞书通知已发送"
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo '✅ 飞书通知发送成功'
+        }
+        failure {
+            echo '❌ 飞书通知发送失败'
+        }
+    }
+}
+```
+
+
+
+check_path.groovy 脚本如下：
+
+```
+def call(String targetPath){
+    // 获取本次构建的变更文件列表
+    def changeLogSets = currentBuild.changeSets
+    def changedFiles = []
+
+    // 收集所有变更的文件路径
+    for (changeLogSet in changeLogSets){
+        for (entry in changeLogSet.getItems()){
+            for (path in entry.getAffectedPaths()){
+                changedFiles.add(path)
+            }
+        }
+    }
+
+    // 如果没有变更记录 (手动构建、定时执行)，默认执行
+    if (changedFiles.isEmpty()){
+        println "⏭️ 无变更记录（手动/定时构建），默认执行"
+        return true
+    }
+
+    // 检查是否包含目标路径的变更
+    for (file in changedFiles){
+        if (file.startsWith(targetPath)){
+            println "✅ 检测到目标路径变更： ${file}"
+            return true
+        }
+    }
+
+    // 没有相关更新
+    println "❌ 没有检测到 ${targetPath} 的变更,跳过构建"
+    return false
+}
+
+    return this
+```
+
+
+
+主流水线  jenkinsfile，讲子目录通过 load 加载：
+
+```
+pipeline {
+    agent any
+
+    // 可选：添加参数，允许手动构建时跳过路径检查
+    parameters {
+        booleanParam(name: 'SKIP_PATH_CHECK', defaultValue: false, description: '手动构建时跳过路径检查')
+    }
+
+    stages {
+        // 新增：检查变更路径的 stage
+        stage('检查变更路径') {
+            when {
+                expression { !params.SKIP_PATH_CHECK }  // 手动构建时可跳过检查
+            }
+            steps {
+                script {
+                    // 加载 checkPath 函数
+                    def check_path = load "${env.WORKSPACE}/calculatortest/api_test/jenkinsfiles/check_path.groovy"
+                    
+                    // 检查是否是 api_test 目录的变更
+                    def shouldRun = check_path('calculatortest/api_test/')
+                    
+                    if (!shouldRun) {
+                        echo "⏭️ 没有检测到 api_test 目录的变更，跳过构建"
+                        currentBuild.result = 'SUCCESS'
+                        // 使用 error 但标记为 ABORTED，这样 post 不会执行
+                        currentBuild.description = 'SKIPPED'
+                        return
+                    }
+                }
+            }
+        }
+    
+        stage('拉取代码') {
+            when{
+                expression { currentBuild.description != 'SKIPPED' }
+            }
+            steps {
+                retry(3){ // 失败后重试3次
+                    git branch: 'master',
+                        url: 'git@github.com:junting-123/calculator.git',
+                        credentialsId: ''
+                }
+            }
+        }
+    
+        stage('构建测试镜像') {
+            when{
+                expression { currentBuild.description != 'SKIPPED' }
+            }
+            steps {
+                sh '''
+                    cd calculatortest/api_test
+                    docker build -t api-test:latest .
+                '''
+            }
+        }
+        
+        stage('运行测试并生成Allure数据') {
+            when{
+                expression { currentBuild.description != 'SKIPPED' }
+            }
+            steps {
+                sh '''
+                    cd calculatortest/api_test
+                    mkdir -p allure-results
+                    docker run --rm \
+                        -v $(pwd)/allure-results:/tests/allure-results \
+                        api-test:latest \
+                        pytest test_api.py --alluredir=/tests/allure-results
+                '''
+            }
+        }
+        
+    }
+    
+    post {
+        always {
+            script {
+                // 只有不是被跳过的构建，才执行报告和通知
+                if (currentBuild.description != 'SKIPPED'){
+                    allure([
+                    includeProperties: false,
+                    jdk: '',
+                    properties: [],
+                    reportBuildPolicy: 'ALWAYS',
+                    results: [[path: 'calculatortest/api_test/allure-results']]
+                ])
+
+                // 2. 发送飞书通知
+                def notify = load "${env.WORKSPACE}/calculatortest/api_test/jenkinsfiles/send_feishu.groovy"
+                notify([
+                    JOB_NAME: env.JOB_NAME,
+                    BUILD_NUMBER: env.BUILD_NUMBER,
+                    BUILD_URL: env.BUILD_URL,
+                    RESULT: currentBuild.result ?: 'SUCCESS'
+                ])
+                echo "📱 飞书通知已发送"
+                }
+            }
+        }
+        success {
+            echo '✅ 接口测试通过！'
+        }
+        failure {
+            echo '❌ 接口测试失败！'
+        }
+
+        aborted {
+            echo '⏭️ 流水线被跳过（路径不匹配）'
+        }
+    }
+}
+```
 
 
 
 ## 五、性能测试
 
-#### 5.1 Jmeter安装
+### 5.1 Jmeter安装
 
 Jmter下载路径：[Jmeter 官网下载](http://jmeter.apache.org/download_jmeter.cgi)
 
@@ -704,7 +1170,7 @@ Jmter下载路径：[Jmeter 官网下载](http://jmeter.apache.org/download_jmet
 
 
 
-#### 5.2 Jmeter环境变量配置
+### 5.2 Jmeter环境变量配置
 
 1.  下载安装包后，解压安装 Jmeter 即可
 
@@ -759,7 +1225,7 @@ jmeter
 
 
 
-#### 5.3 Jmeter测试计划
+### 5.3 Jmeter测试计划
 
 1.添加线程组
 
@@ -816,14 +1282,17 @@ JMeter的HTTP请求是性能测试中常用的功能，用于模拟用户向服�
 
 6.保存测试计划
 
-File -> Save Test Plan as...，然后在命令行里这样执行：
+File -> Save Test Plan as...，假设我们命名为xingneng.jmx，然后切换到所在目录，在命令行里这样执行：
 
 ```bash
-# 基本命令：-n 无界面模式，-t 指定脚本，-l 保存原始数据
-jmeter -n -t E:\code\calculator\calculatortest\jmeter\calculator_test.jmx -l E:\code\calculator\calculatortest\jmeter\results.jtl
+# 切换到xingneng.jmx所在目录
+cd xx
 
-# 生成报告：-e 生成报告，-o 指定报告目录（目录必须为空）
-jmeter -n -t E:\code\calculator\calculatortest\jmeter\calculator_test.jmx -l E:\code\calculator\calculatortest\jmeter\results.jtl -e -o E:\code\calculator\calculatortest\jmeter\report
+# 基本命令：-n 无界面模式，-t 指定脚本，-l 保存原始数据
+jmeter -n -t xingneng.jmx -l results.jtl
+
+# 基于 JTL 文件生成 HTML 报告
+jmeter -g results.jtl -o report
 ```
 
 结果会直接生成一个包含图表和详细数据的 HTML 报告，看起来更直观，也方便分享。
@@ -838,28 +1307,265 @@ jmeter -n -t E:\code\calculator\calculatortest\jmeter\calculator_test.jmx -l E:\
 
 
 
-#### 5.4 打包成 docker
+### 5.4 编写 dockerfile
 
-为了在容器里跑 JMeter，需要写一个 Dockerfile 来打包。
+为了在容器里跑 JMeter，需要写一个 dockerfile 来打包。
 
-1. **创建 Dockerfile**：在项目根目录下，创建名为 `Dockerfile` 的文件，内容如下
+1. 创建 dockerfile
 
-```dockerfile
-# 使用轻量级的 JMeter 基础镜像
-FROM alpine/jmeter:5.6-alpine
+   在项目根目录下，创建名为 `dockerfile` 的文件，内容如下
 
-# 设置工作目录，Jenkins 会将脚本挂载到这里
-WORKDIR /jmeter
+   ```dockerfile
+   FROM justb4/jmeter:5.6.3
+   
+   WORKDIR /opt/jmeter/scripts
+   
+   # 复制测试脚本
+   COPY xingneng.jmx .
+   
+   # 默认执行测试，生成结果和HTML报告
+   CMD ["-n", \
+        "-t", "/opt/jmeter/scripts/xingneng.jmx", \
+        "-l", "/opt/jmeter/results/result.jtl", \
+        "-e", "-o", "/opt/jmeter/results/html-report"]
+   ```
 
-# 设置容器入口命令，非 GUI 模式运行
-ENTRYPOINT ["jmeter", "-n", "-t", "/jmeter/test.jmx"]
+   同样，这一步写完 dockerfile 后，将代码 git push到 github，后续通过服务端的 jenkins 拉取代码并打包，在服务端构建镜像自动运行性能测试。
+
+
+
+### 5.5 编写 jenkinsfile
+
+目录结构如下：
+
+```
+jmeter-docker/
+├── dockerfile
+└── xingneng.jmx             
+└── jenkinsfile  
+└── jenkinsfiles/  
+    └── send_feishu.groovy			# 子脚本(用于结果发送飞书)
+    └── check_path.groovy			# 子脚本(用于github智能触发对应任务)
 ```
 
-> **说明**：`alpine/jmeter` 是一个官方轻量级镜像。`-n` 代表在非 GUI 模式下运行
+
+
+send_feishu.groovy 脚本如下：
+
+```groovy
+def call(Map params) {
+    def webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/d27ef06c-cdad-4eff-a7d0-46f089c661bf"
+    def status = params.RESULT
+    def statusText = status == 'SUCCESS' ? '✅ 通过' : '❌ 失败'
+    def statusColor = status == 'SUCCESS' ? 'green' : 'red'
+    def reportUrl = "${params.BUILD_URL}allure/"
+    
+    sh """
+        curl -X POST -H 'Content-Type: application/json' \
+        -d '{
+            "msg_type": "interactive",
+            "card": {
+                "header": {
+                    "title": {"content": "Jenkins 构建通知", "tag": "plain_text"},
+                    "template": "${statusColor}"
+                },
+                "elements": [{
+                    "tag": "div",
+                    "text": {
+                        "content": "**项目**: ${params.JOB_NAME}\\n**构建号**: #${params.BUILD_NUMBER}\\n**结果**: ${statusText}\\n**报告**: [点击查看](${reportUrl})",
+                        "tag": "lark_md"
+                    }
+                }]
+            }
+        }' ${webhook}
+    """
+    echo "飞书通知已发送"
+}
+
+return this
+```
 
 
 
+check_path.groovy 脚本如下
 
+```
+def call(String targetPath){
+    // 获取本次构建的变更文件列表
+    def changeLogSets = currentBuild.changeSets
+    def changedFiles = []
+
+    // 收集所有变更的文件路径
+    for (changeLogSet in changeLogSets){
+        for (entry in changeLogSet.getItems()){
+            for (path in entry.getAffectedPaths()){
+                changedFiles.add(path)
+            }
+        }
+    }
+
+    // 如果没有变更记录 (手动构建、定时执行)，默认执行
+    if (changedFiles.isEmpty()){
+        println "⏭️ 无变更记录（手动/定时构建），默认执行"
+        return true
+    }
+
+    // 检查是否包含目标路径的变更
+    for (file in changedFiles){
+        if (file.startsWith(targetPath)){
+            println "✅ 检测到目标路径变更： ${file}"
+            return true
+        }
+    }
+
+    // 没有相关更新
+    println "❌ 没有检测到 ${targetPath} 的变更,跳过构建"
+    return false
+}
+
+    return this
+```
+
+
+
+主流水线 jenkinsfile 脚本如下：
+
+```groovy
+pipeline{
+    agent any
+
+     // 可选：添加参数，允许手动构建时跳过路径检查
+    parameters {
+        booleanParam(name: 'SKIP_PATH_CHECK', defaultValue: false, description: '手动构建时跳过路径检查')
+    }
+
+    stages {
+        // 新增：检查变更路径的 stage
+        stage('检查变更路径') {
+            when {
+                expression { !params.SKIP_PATH_CHECK }  // 手动构建时可跳过检查
+            }
+            steps {
+                script {
+                    // 加载 checkPath 函数
+                    def check_path = load "${env.WORKSPACE}/calculatortest/jmeter_test/jenkinsfiles/check_path.groovy"
+                    
+                    // 检查是否是 api_test 目录的变更
+                    def shouldRun = check_path('calculatortest/jmeter_test/')
+                    
+                    if (!shouldRun) {
+                        echo "⏭️ 没有检测到 api_test 目录的变更，跳过构建"
+                        currentBuild.result = 'SUCCESS'
+                        // 使用 error 但标记为 ABORTED，这样 post 不会执行
+                        currentBuild.description = 'SKIPPED'
+                        // 添加 return，退出当前 stage 的 script 块
+                        return
+                    }
+                }
+            }
+        }
+
+
+        stage('拉取代码'){
+            when{
+                expression { currentBuild.description != 'SKIPPED' }
+            }
+            steps{
+                retry(3){
+                   git branch: 'master',
+                    url: 'git@github.com:junting-123/calculator.git',
+                    credentialsId: '' 
+                }
+            }
+        }
+
+        stage('构建镜像'){
+            when{
+                expression { currentBuild.description != 'SKIPPED' }
+            }
+            steps{
+                sh '''
+                    cd calculatortest/jmeter_test
+                    docker build -t jmeter_test:latest .
+                '''
+                }
+            }
+
+        stage('运行测试并生成html数据'){
+            when{
+                expression { currentBuild.description != 'SKIPPED' }
+            }
+            steps{
+                sh '''
+                    cd calculatortest/jmeter_test
+                    sudo rm -rf report   # 清空旧报告
+                    sudo rm -f results.jtl
+                    mkdir -p report
+
+                    # 使用 Docker 容器运行 JMeter
+                    docker run --rm \
+                        --network host \
+                        -v $(pwd):/tests \
+                        jmeter_test:latest \
+                        -n -t /tests/xingneng.jmx -l /tests/results.jtl -e -o /tests/report
+
+                        sudo chown -R junting:junting report
+                        sudo chown junting:junting results.jtl 2>/dev/null || true
+
+                '''
+                }
+            }
+        }
+
+    post{
+        always{
+            script{
+                if (currentBuild.description != 'SKIPPED'){
+                     // 发布 HTML 报告到 Jenkins
+            publishHTML target:[
+                allowMissing: true,
+                alwaysLinkToLastBuild: true,
+                keepAll:true,
+                reportDir: 'calculatortest/jmeter_test/report',
+                reportFiles: 'index.html',
+                reportName: 'Jmeter 性能测试报告'
+            ]
+
+            // 归档 JTL 文件
+            archiveArtifacts artifacts: 'calculatortest/jmeter_test/results.jtl',
+                                allowEmptyArchive: true
+
+            // 加载并发送飞书通知
+             def notify = load "${env.WORKSPACE}/calculatortest/jmeter_test/jenkinsfiles/send_feishu.groovy"
+                notify([
+                    JOB_NAME: env.JOB_NAME,
+                    BUILD_NUMBER: env.BUILD_NUMBER,
+                    BUILD_URL: env.BUILD_URL,
+                    RESULT: currentBuild.result ?: 'SUCCESS',
+                    REPORT_URL: "${env.BUILD_URL}JMeter_20性能测试报告/"  // 指向性能报告
+                ])
+                echo "📱 飞书通知已发送"
+                }
+                else{
+                    echo "⏭️ 构建被跳过，不生成报告和通知"
+                } 
+            }
+        }
+
+        success {
+            echo '✅ 性能测试通过！'
+        }
+
+        failure {
+            echo '❌ 性能测试失败！'
+        }
+
+        aborted{
+            echo '⏭️ 流水线被跳过（路径不匹配）'
+        }
+    }
+}
+```
 
 
 
@@ -1030,12 +1736,13 @@ H/60 * * * *
 - **Payload URL**: 填写 `http://<你的Jenkins地址>/github-webhook/`。例如：`http://192.168.1.100:8080/github-webhook/`。
 - **Content type**: 选择 `application/json`。
 - **Events**: 选择 `Just the push event`，这样只有在代码推送时才会触发。
+- **SSL verification**：选Disable (not recommended)，允许使用HTTP协议。
 
 ③点击 **Add webhook** 保存。
 
 *注意：<你的Jenkins地址>必须用公网地址，可使用内网穿透技术部署成公网ip。
 
-内网穿透技术详见：[Windows/Linux 使用ngrok实现内网穿透-CSDN博客](https://blog.csdn.net/manmanmanzai/article/details/161453597?spm=1001.2014.3001.5501)
+内网穿透技术详见：[0成本在 Linux 上实现 NATAPP 内网穿透技术-CSDN博客](https://blog.csdn.net/manmanmanzai/article/details/161625604?spm=1001.2014.3001.5502)
 
 
 
@@ -1043,109 +1750,38 @@ H/60 * * * *
 
 
 
-### 6.3 Jenkins打包构建镜像
+### 6.3 接口自动化测试
 
-根据之前介绍的docker打包部署逻辑，将其定义在pipeline里，如下：
+#### 6.3.1 pipeline配置
 
-```groovy
-pipeline {
-    agent any
-    
-    environment {
-        DOCKER_IMAGE = 'calculator-web'
-        CONTAINER_NAME = 'calculator-web-app'
-        HOST_PORT = '8081'
-        CONTAINER_PORT = '8080'
-        WORK_DIR = 'calculatorweb'
-    }
-    
-    stages {
-        stage('Git Checkout') {
-            steps {
-                git branch: 'develop',
-                    url: 'http://github.com/junting-123/calculator.git',
-                    credentialsId: 'github-token'
-            }
-        }
-        
-        stage('Build Docker Image') {
-            steps {
-                script {
-                    echo "开始构建 Docker 镜像..."
-                    sh """
-                        cd ${WORK_DIR}
-                        docker build -t ${DOCKER_IMAGE}:latest .
-                        docker tag ${DOCKER_IMAGE}:latest ${DOCKER_IMAGE}:build-${BUILD_NUMBER}
-                    """
-                    echo "镜像构建完成: ${DOCKER_IMAGE}:latest"
-                }
-            }
-        }
-        
-        stage('Stop Old Container') {
-            steps {
-                script {
-                    echo "停止旧容器..."
-                    sh """
-                        docker stop ${CONTAINER_NAME} 2>/dev/null || true
-                        docker rm ${CONTAINER_NAME} 2>/dev/null || true
-                    """
-                }
-            }
-        }
-        
-        stage('Run New Container') {
-            steps {
-                script {
-                    echo "启动新容器..."
-                    sh """
-                        docker run -d \
-                            -p ${HOST_PORT}:${CONTAINER_PORT} \
-                            --name ${CONTAINER_NAME} \
-                            --restart unless-stopped \
-                            ${DOCKER_IMAGE}:latest
-                    """
-                    echo "容器启动成功: ${CONTAINER_NAME}"
-                }
-            }
-        }
-        
-    
-        
-        stage('Cleanup') {
-            steps {
-                script {
-                    echo "清理旧的 Docker 镜像..."
-                    sh """
-                        docker image prune -f --filter "until=24h" 2>/dev/null || true
-                    """
-                }
-            }
-        }
-    }
-    
-    post {
-        failure {
-            script {
-                echo "构建失败，查看容器日志..."
-                sh """
-                    docker logs ${CONTAINER_NAME} --tail 50 2>/dev/null || true
-                """
-            }
-        }
-        always {
-            script {
-                echo "Pipeline 执行完成"
-                sh 'docker ps -a | grep calculator-web || true'
-            }
-        }
-    }
-}
-```
+> 由于 github 上已上传 dockerfile 和 jenkinsfile，所以我们采取从源代码管理（SCM）中获取流水线脚本方式，来做接口自动化测试。
+
+1.创建任务
+
+点击左上角的：新建 Item——>输入任务名称：`api_test`（或你喜欢的名字）——>选择 Pipeline——>点击 确定
 
  
 
-验证是否成功部署：
+2.配置 pipeline
+
+| 配置项         | 选择/填写的内容                 |
+| :------------- | :------------------------------ |
+| **Definition** | 选择 `Pipeline script from SCM` |
+| **SCM**        | 选择 `Git`                      |
+
+展开后填写：
+
+| 配置项                                     | 填写内容                                           |
+| :----------------------------------------- | :------------------------------------------------- |
+| **Repository URL**                         | `https://github.com/你的用户名/your-repo.git`      |
+| **Credentials**                            | 点击添加 → 选择 GitHub 用户名/密码 或 Access Token |
+| **Branches to build**                      | `*/main`（或 `*/master`）                          |
+| **Script Path**                            | 填写 Jenkinsfile 相对于仓库根目录的完整路径        |
+| **GitHub hook trigger for GITScm polling** | 构建触发器                                         |
+
+
+
+3.验证是否成功部署：
 
 ```
 # 查看镜像
@@ -1153,34 +1789,11 @@ docker images
 
 # 查看容器是否在运行
 docker ps | grep xx
-
-# 测试应用是否返回内容（根据你的实际路径）
-curl http://localhost:8081/calc?a=10&b=5&op=add
 ```
 
 
 
-## 七、CI/CD自动测试工作流
-
-### 7.1 自动测试架构设计
-
-通过第六章我们已经完成了持续部署工作流：
-
-github 每更新一次 -> 自动触发拉取git仓库 -> 构建docker镜像 -> 部署到服务端
-
-接下来我们将测试部分加入工作流中，推荐创建独立的的测试流水线，架构设计如下：
-
-```
-部署流水线 (已存在)
-    ↓ (触发)
-测试流水线 (新建)
-    ↓ (测试)
-测试报告
-```
-
-
-
-### 7.2 接口测试报告生成
+#### 6.3.2 Allure 测试报告配置
 
 1.Jenkins 中安装 Allure 插件
 
@@ -1206,85 +1819,13 @@ github 每更新一次 -> 自动触发拉取git仓库 -> 构建docker镜像 -> �
 
 - 版本选择最新的稳定版（如 2.27.0 以上）
 
-
-
-
-Pipeline如下：
-
-```groovy
-pipeline {
-    agent any
-    
-    stages {
-        stage('拉取代码') {
-            steps {
-                git branch: 'master',
-                    url: 'git@github.com:junting-123/calculator.git'
-                    credentialsId:'github-token'
-            }
-        }
-        
-        stage('构建测试镜像') {
-            steps {
-                sh '''
-                    cd calculatortest/api_test
-                    docker build -t api-test:latest .
-                '''
-            }
-        }
-        
-        stage('查看镜像') {
-            steps {
-                sh 'docker images | grep api-test'
-            }
-        }
-        
-        stage('运行测试并生成Allure数据') {
-            steps {
-                sh '''
-                    cd calculatortest/api_test
-                    mkdir -p allure-results
-                    docker run --rm \
-                        -v $(pwd)/allure-results:/tests/allure-results \
-                        api-test:latest \
-                        pytest test_api.py --alluredir=/tests/allure-results
-                '''
-            }
-        }
-        
-        stage('生成Allure报告') {
-            steps {
-                allure([
-                    includeProperties: false,
-                    jdk: '',
-                    properties: [],
-                    reportBuildPolicy: 'ALWAYS',
-                    results: [[path: 'calculatortest/api_test/allure-results']]
-                ])
-            }
-        }
-    }
-    
-    post {
-        success {
-            echo '✅ 测试通过！'
-        }
-        failure {
-            echo '❌ 测试失败！'
-        }
-    }
-}
-```
-
-
-
 运行完成后，可以在 Jenkins 界面查看 Allure 报告：
 
-![image-20260529143150039](https://cdn.jsdelivr.net/gh/junting-123/my-blog-images/img/20260529143152927.png)
+![image-20260529143150039](https://cdn.jsdelivr.net/gh/junting-123/my-blog-images/img/20260601145124999.png)
 
 
 
-### 7.3 测试报告发送至飞书
+#### 6.3.3 测试报告发送至飞书
 
 1.飞书机器人配置
 
@@ -1332,7 +1873,7 @@ curl -X POST -H 'Content-Type: application/json' \
 
 
 
-3.确认Allure报告可访问
+4.确认Allure报告可访问
 
 你已经通过Allure插件成功生成了报告，报告地址格式为：
 
@@ -1342,147 +1883,130 @@ http://你的JenkinsIP:8080/job/你的任务名/构建编号/allure/
 
 
 
-4.Pipeline 集成飞书通知
+5.确认飞书机器人自动发送
 
-将飞书发送封装成独立的 Pipeline，命名为 send-feishu 流水线：
+![image-20260601144618577](https://cdn.jsdelivr.net/gh/junting-123/my-blog-images/img/20260601144619738.png)
 
-```
-pipeline {
-    agent any
-    
-    parameters {
-        string(name: 'JOB_NAME', defaultValue: '', description: '项目名称')
-        string(name: 'BUILD_NUMBER', defaultValue: '', description: '构建编号')
-        string(name: 'BUILD_URL', defaultValue: '', description: '构建地址')
-        string(name: 'RESULT', defaultValue: 'SUCCESS', description: '构建结果')
-    }
-    
-    stages {
-        stage('发送飞书通知') {
-            steps {
-                script {
-                    def webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/d27ef06c-cdad-4eff-a7d0-46f089c661bf"
-                    def status = params.RESULT
-                    def statusText = status == 'SUCCESS' ? '✅ 通过' : '❌ 失败'
-                    def statusColor = status == 'SUCCESS' ? 'green' : 'red'
-                    def reportUrl = "${params.BUILD_URL}allure/"
-                    
-                    sh """
-                        curl -X POST -H 'Content-Type: application/json' \
-                        -d '{
-                            "msg_type": "interactive",
-                            "card": {
-                                "header": {
-                                    "title": {"content": "Jenkins 构建通知", "tag": "plain_text"},
-                                    "template": "${statusColor}"
-                                },
-                                "elements": [{
-                                    "tag": "div",
-                                    "text": {
-                                        "content": "**项目**: ${params.JOB_NAME}\\n**构建号**: #${params.BUILD_NUMBER}\\n**结果**: ${statusText}\\n**报告**: [点击查看](${reportUrl})",
-                                        "tag": "lark_md"
-                                    }
-                                }]
-                            }
-                        }' ${webhook}
-                    """
-                    echo "飞书通知已发送"
-                }
-            }
-        }
-    }
-    
-    post {
-        success {
-            echo '✅ 飞书通知发送成功'
-        }
-        failure {
-            echo '❌ 飞书通知发送失败'
-        }
-    }
-}
+
+
+### 6.4 性能自动化测试
+
+#### 6.4.1 Html 测试报告配置
+
+性能自动化测试 pipeline 配置与接口测试一致。Html 报告插件配置如下：
+
+1. 在 Jenkins 首页，点击 **Manage Jenkins** > **Manage Plugins**。
+2. 进入 **Available** 选项卡。
+3. 在搜索框中输入 **HTML Publisher**。
+4. 勾选搜索结果中的 **"HTML Publisher plugin"**。
+5. 点击 **Download now and install after restart**（或 **Install without restart**）。
+6. 安装完成后，**重启 Jenkins**（可以在管理页面通过 `http://你的Jenkins地址/safeRestart` 安全重启）。
+
+
+
+#### 6.4.2 针对 html 图表不显示问题解决
+
+
+
+1.首先确认是否是数据的原因
+
+```bash
+# 切换到保存数据的位置
+cd /home/junting/.jenkins/workspace/jmeter_test/calculatortest/jmeter_test
+
+# 查看 JTL 文件的前几行
+head -5 results.jtl
+
+# 查看 JTL 文件的后几行
+tail -5 results.jtl
+
+# 查看所有响应码
+cat results.jtl | grep -v timeStamp | cut -d',' -f4 | sort | uniq -c
 ```
 
 
 
-主测试中添加send-feishu，完整版如下：
+2.使用 Script Console 临时生效图表
+
+> 如果数据没有问题，Meter 生成的 HTML 报告在 Jenkins 中图表不显示，可能原因是 Jenkins 默认的 Content Security Policy (CSP，内容安全策略) 为了安全，阻止了报告中 CSS 和 JavaScript 等动态内容的加载。
+
+通过 Jenkins 的脚本控制台临时修改 CSP 配置。临时生效，Jenkins 服务重启后配置会失效，需要重新执行，适用于开发环境测试，或紧急验证报告时适用。步骤如下：
+
+1. **打开 `Script Console`**：
+   登录 Jenkins 后，点击 **Manage Jenkins** → **Script Console**。
+2. **执行脚本**：
+   在命令行输入框中粘贴以下命令，然后点击 **Run** 按钮。
 
 ```groovy
-pipeline {
-    agent any
-    
-    // 1. 拉取测试代码
-    stages {
-        stage('拉取代码') {
-            steps {
-                git branch: 'master',
-                    url: 'http://github.com/junting-123/calculator.git',
-                    credentialsId: 'github-token'
-            }
-        }
-    
-        stage('构建测试镜像') {
-            steps {
-                sh '''
-                    cd calculatortest/api_test
-                    docker build -t api-test:latest .
-                '''
-            }
-        }
-        stage('运行测试并生成Allure数据') {
-            steps {
-                sh '''
-                    cd calculatortest/api_test
-                    # 创建报告目录
-                    mkdir -p allure-results
-                    # 运行测试并生成 Allure 数据
-                    docker run --rm \
-                        -v $(pwd)/allure-results:/tests/allure-results \
-                        api-test:latest \
-                        pytest test_api.py --alluredir=/tests/allure-results
-                '''
-            }
-        }
-        
-        stage('生成Allure报告') {
-            steps {
-                allure([
-                    includeProperties: false,
-                    jdk: '',
-                    properties: [],
-                    reportBuildPolicy: 'ALWAYS',
-                    results: [[path: 'calculatortest/api_test/allure-results']]
-                ])
-            }
-        }
-    }
-    
-    post {
-        always {
-            script {
-                def reportUrl = "${env.BUILD_URL}allure/"
-            
-            // 触发飞书通知
-                build job: 'send-feishu',
-                    parameters: [
-                        string(name: 'JOB_NAME', value: env.JOB_NAME),
-                        string(name: 'BUILD_NUMBER', value: env.BUILD_NUMBER),
-                        string(name: 'BUILD_URL', value: env.BUILD_URL),
-                        string(name: 'RESULT', value: currentBuild.result ?: 'SUCCESS')
-                ],
-                    wait: true
-                echo "📱 已触发飞书通知任务"
-            }
-        }
-        success {
-            echo '✅ 测试通过！'
-        }
-        failure {
-            echo '❌ 测试失败！'
-        }
-    }
-}
+System.setProperty("hudson.model.DirectoryBrowserSupport.CSP", "")
 ```
+
+3. **验证效果**：
+   执行完该命令后，重新进入你的 `jmeter_test` 任务，再次查看 **JMeter 性能测试报告**，图表应该就能正常显示了。
+
+
+
+3.修改 Jenkins 启动配置永久生效图表
+
+通过修改 CSP 配置文件来实现 jenkins 图表显示永久生效。
+
+```
+# 切换到 jenkins 文件夹下
+cd /home/xx/xx/jenkins
+
+# 禁用csp
+cat > start_jenkins.sh << 'EOF'
+#!/bin/bash
+JENKINS_WAR="/home/xx/jenkins.war"  # 改成实际路径
+cd $(dirname $JENKINS_WAR)
+nohup java -Dhudson.model.DirectoryBrowserSupport.CSP= -jar $JENKINS_WAR > jenkins.log 2>&1 &
+echo "Jenkins started with CSP disabled"
+EOF
+
+# 启动
+./start_jenkins.sh
+```
+
+访问 Jenkins，浏览器打开 http://192.168.171.128:8080
+
+
+
+## 七、CI/CD自动测试工作流
+
+
+
+### 7.1 自动测试架构设计
+
+通过第六章我们已经完成了持续部署工作流：
+
+github 每更新一次 -> 自动触发拉取git仓库 -> 构建docker镜像 -> 部署到服务端
+
+架构设计如下：
+
+```
+部署流水线 (已存在)
+    ↓ (触发)
+测试流水线 (新建)
+    ↓ (测试)
+测试报告
+ 	↓ 
+飞书结果
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -98,7 +98,7 @@ ngrok HTTP 8080
 
 
 
-## 4.Linux使用 ngrok 实现内网穿透步骤
+## 4. Linux 使用 ngrok 实现内网穿透步骤
 
 ### 4.1 使用官方 ngrok 服务
 
