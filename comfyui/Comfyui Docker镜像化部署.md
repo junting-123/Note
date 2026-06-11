@@ -321,3 +321,54 @@ docker run -d \
   <你的完整镜像地址>
 ```
 
+
+
+
+
+## 7.把修改后的容器保存为新镜像的方法
+
+确认容器正在运行
+
+首先，打开 PowerShell，
+
+```
+# 1. 确认你的 comfyui 容器处于运行状态
+docker ps --filter name=comfyui
+
+# 2. 进入容器安装依赖
+docker exec -it comfyui bash
+
+# 在容器内执行：
+pip install opencv-python soundfile matplotlib google-generativeai gguf piexif aiofiles rembg
+
+# 安装完成后退出容器
+exit
+
+# 3. 提交容器为新镜像
+docker commit comfyui my-comfyui:latest
+
+# 4. 打标签（注意：标签要和仓库路径完全一致）
+docker tag my-comfyui:latest crpi-97a0t3x6hs9hfupr.cn-chengdu.personal.cr.aliyuncs.com/comfyui_junting/comfyui:latest
+
+# 5. 推送到阿里云
+docker push crpi-97a0t3x6hs9hfupr.cn-chengdu.personal.cr.aliyuncs.com/comfyui_junting/comfyui:latest
+```
+
+
+
+## 8. 在云端服务器上直接拉取运行
+
+```
+# 拉取你上传的镜像（已包含所有依赖）
+docker pull crpi-97a0t3x6hs9hfupr.cn-chengdu.personal.cr.aliyuncs.com/comfyui_junting/comfyui:latest
+
+# 运行容器
+docker run -d --gpus all -p 8188:8188 --name comfyui \
+  -v /your/cloud/models:/app/models \
+  -v /your/cloud/output:/app/output \
+  -v /your/cloud/input:/app/input \
+  -v /your/cloud/user:/app/user \
+  -v /your/cloud/custom_nodes:/app/custom_nodes \
+  crpi-97a0t3x6hs9hfupr.cn-chengdu.personal.cr.aliyuncs.com/comfyui_junting/comfyui:latest
+```
+
