@@ -1,6 +1,6 @@
 
 
-# Comfyui Docker 镜像部署到云端
+# Comfyui Docker 镜像部署到本地
 
 > **核心思想**：把 ComfyUI 的代码和模型文件分开存放。
 >
@@ -258,117 +258,42 @@ docker push registry.cn-hangzhou.aliyuncs.com/xxxx/comfyui:latest
 
 
 
-## 6. comfyui 部署云端
+## 6. 最快捷comfyui 部署云端
 
-1.在云服务器上拉取镜像
+> 最快方案 = **云服务器直接运行 ComfyUI + SCP 一次性上传 + Syncthing做增量同步（可选）**
 
-把 ComfyUI 程序拉到云服务器
+1.云服务器装comfyui
 
 ```
-# 云端登录阿里云 Docker 仓库
-docker login --username=你的阿里云账号 registry.cn-hangzhou.aliyuncs.com
+# 安装comfyui
+git clone https://github.com/comfyanonymous/ComfyUI.git
 
-# 拉取镜像
-docker pull <你的完整镜像地址>:<镜像版本号>
+# 进入目录
+cd ComfyUI
+python -m venv venv
+source venv/Scripts/activate
 
-# 验证拉取结果
-docker images
-```
-
-
-
-2.上传模型及个人数据
-
-> `scp` 是 **Secure Copy Protocol**（安全复制协议）的缩写，是一个在 Linux、macOS 和 Windows 上都可用的命令行工具。
->
-> 简单来说，它的作用就是**通过 SSH（安全外壳协议）在你的本地电脑和远程服务器之间，安全地复制文件和文件夹**。
-
-
-
-使用SCP 命令，把本地 `F:/start_comfyui/comfyui_data/` 上传到云服务器的 `/data/comfyui/`：
-
-```bash
-scp -r <本地路径> <云服务器用户名>@<云服务器IP>:<目标路径>
-# 比如：scp -r F:/start_comfyui/comfyui_data root@<你的云服务器IP>:/data/
-```
-
-| 本地路径                                     | →    | 云服务器路径                      |
-| :------------------------------------------- | :--- | :-------------------------------- |
-| `F:/start_comfyui/comfyui_data/`             | →    | `/data/comfyui_data/`             |
-| `F:/start_comfyui/comfyui_data/models`       | →    | `/data/comfyui_data/models`       |
-| `F:/start_comfyui/comfyui_data/output`       | →    | `/data/comfyui_data/output`       |
-| `F:/start_comfyui/comfyui_data/input`        | →    | `/data/comfyui_data/input`        |
-| `F:/start_comfyui/comfyui_data/user`         | →    | `/data/comfyui_data/user`         |
-| `F:/start_comfyui/comfyui_data/custom_nodes` | →    | `/data/comfyui_data/custom_nodes` |
-
-
-
-3.运行容器
-
-此时云服务器上已经有数据了，挂载并运行：
-
-```bash
-# 运行容器 (请替换成你的镜像地址和服务器路径)
-docker run -d \
-  --gpus all \
-  -p 8188:8188 \
-  --name comfyui \
-  -v /data/comfyui_data/models:/app/models \
-  -v /data/comfyui_data/output:/app/output \
-  -v /data/comfyui_data/input:/app/input \
-  -v /data/comfyui_data/user:/app/user \
-  -v /data/comfyui_data/custom_nodes:/app/custom_nodes \
-  <你的完整镜像地址>
+# 直接安装依赖
+pip install -r requirements.txt
 ```
 
 
 
+2.Syncthing 云端自动同步本地目录
 
+> Syncthing = 两台电脑之间“自动同步文件夹”的工具
 
-## 7.把修改后的容器保存为新镜像的方法
+你只需要做一次配置，之后：
 
-确认容器正在运行
-
-首先，打开 PowerShell，
+- 本地改文件 → 云服务器自动同步
+- 新增模型 → 自动上传
+- 删除文件 → 自动同步删除
 
 ```
-# 1. 确认你的 comfyui 容器处于运行状态
-docker ps --filter name=comfyui
-
-# 2. 进入容器安装依赖
-docker exec -it comfyui bash
-
-# 在容器内执行：
-pip install opencv-python soundfile matplotlib google-generativeai gguf piexif aiofiles rembg
-
-# 安装完成后退出容器
-exit
-
-# 3. 提交容器为新镜像
-docker commit comfyui my-comfyui:latest
-
-# 4. 打标签（注意：标签要和仓库路径完全一致）
-docker tag my-comfyui:latest crpi-97a0t3x6hs9hfupr.cn-chengdu.personal.cr.aliyuncs.com/comfyui_junting/comfyui:latest
-
-# 5. 推送到阿里云
-docker push crpi-97a0t3x6hs9hfupr.cn-chengdu.personal.cr.aliyuncs.com/comfyui_junting/comfyui:latest
+本地电脑（F盘模型库）
+        ⇅ 自动同步
+云服务器（ComfyUI模型目录）
 ```
 
 
-
-## 8. 在云端服务器上直接拉取运行
-
-```
-# 拉取你上传的镜像（已包含所有依赖）
-docker pull crpi-97a0t3x6hs9hfupr.cn-chengdu.personal.cr.aliyuncs.com/comfyui_junting/comfyui:latest
-
-# 运行容器
-docker run -d --gpus all -p 8188:8188 --name comfyui \
-  -v /your/cloud/models:/app/models \
-  -v /your/cloud/output:/app/output \
-  -v /your/cloud/input:/app/input \
-  -v /your/cloud/user:/app/user \
-  -v /your/cloud/custom_nodes:/app/custom_nodes \
-  crpi-97a0t3x6hs9hfupr.cn-chengdu.personal.cr.aliyuncs.com/comfyui_junting/comfyui:latest
-```
 
